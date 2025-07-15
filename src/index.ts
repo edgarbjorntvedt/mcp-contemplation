@@ -123,7 +123,7 @@ class ContemplationManager {
 
       this.subprocess.stdout?.on('data', (data) => {
         try {
-          const lines = data.toString().split('\n').filter(line => line.trim());
+          const lines = data.toString().split('\n').filter((line: string) => line.trim());
           for (const line of lines) {
             const response = JSON.parse(line);
             if (response.has_insight) {
