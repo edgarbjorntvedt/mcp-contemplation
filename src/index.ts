@@ -33,11 +33,21 @@ Sends a thought for background processing.
 - priority: Optional priority (1-10, default 5)
 Returns: Thought ID for tracking
 
-### get_insights(thought_type?, limit?)
+### get_insights(thought_type?, limit?, min_significance?)
 Retrieves processed insights from the contemplation loop.
 - thought_type: Optional filter by type
 - limit: Max number of insights (default 10)
+- min_significance: Minimum significance score (default 5)
 Returns: Array of insights with metadata
+
+### set_threshold(significance_threshold)
+Sets the minimum significance for insights to be returned.
+- significance_threshold: Number 1-10 (default 5)
+Returns: Confirmation message
+
+### get_memory_stats()
+Gets memory usage statistics for the contemplation system.
+Returns: Stats object with insight counts, memory usage, etc.
 
 ### get_status()
 Gets the current status of the contemplation loop.
@@ -82,6 +92,8 @@ interface Insight {
   significance: number;
   timestamp: string;
   used: boolean;
+  similar_count?: number;
+  aggregated_ids?: string[];
 }
 
 class ContemplationManager {
@@ -89,6 +101,8 @@ class ContemplationManager {
   private contemplationPath: string;
   private bridgePath: string;
   private insights: Insight[] = [];
+  private maxInsightsInMemory: number = 100;
+  private significanceThreshold: number = 5;
   
   constructor() {
     this.contemplationPath = '/Users/bard/Code/contemplation-loop/src/contemplation_loop.py';
@@ -160,7 +174,16 @@ class ContemplationManager {
   }
 
   async getInsights(thoughtType?: string, limit: number = 10): Promise<Insight[]> {
-    let filtered = this.insights;
+    // First, clean up old/low-value insights
+    this.pruneInsights();
+    
+    // Aggregate similar insights
+    this.aggregateSimilarInsights();
+    
+    // Filter unused insights above threshold
+    let filtered = this.insights.filter(i => 
+      !i.used && i.significance >= this.significanceThreshold
+    );
     
     if (thoughtType) {
       filtered = filtered.filter(i => i.thought_type === thoughtType);
@@ -168,19 +191,113 @@ class ContemplationManager {
     
     // Sort by significance and recency
     filtered.sort((a, b) => {
+      // Prioritize aggregated insights
+      if (a.similar_count && b.similar_count) {
+        const countDiff = (b.similar_count || 1) - (a.similar_count || 1);
+        if (countDiff !== 0) return countDiff;
+      }
+      
       if (b.significance !== a.significance) {
         return b.significance - a.significance;
       }
       return new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime();
     });
 
-    // Mark as used (for learning system)
+    // Mark as used and clean from memory
     const results = filtered.slice(0, limit);
     results.forEach(insight => {
       insight.used = true;
+      // Remove high-frequency patterns after use to prevent repetition
+      if (insight.similar_count && insight.similar_count > 3) {
+        this.removeInsight(insight.id);
+      }
     });
 
     return results;
+  }
+
+  private pruneInsights(): void {
+    const now = Date.now();
+    const maxAge = 24 * 60 * 60 * 1000; // 24 hours
+    
+    // Remove old, used, or low-significance insights
+    this.insights = this.insights.filter(insight => {
+      const age = now - new Date(insight.timestamp).getTime();
+      
+      // Keep if: recent AND (unused OR high significance)
+      return age < maxAge && (!insight.used || insight.significance >= 8);
+    });
+    
+    // If still too many, keep only the most significant
+    if (this.insights.length > this.maxInsightsInMemory) {
+      this.insights.sort((a, b) => b.significance - a.significance);
+      this.insights = this.insights.slice(0, this.maxInsightsInMemory);
+    }
+  }
+
+  private aggregateSimilarInsights(): void {
+    // Simple similarity check based on content overlap
+    const aggregated: Map<string, Insight> = new Map();
+    
+    for (const insight of this.insights) {
+      if (insight.used) continue;
+      
+      let foundSimilar = false;
+      for (const [key, existing] of aggregated) {
+        if (this.areSimilar(insight.content, existing.content)) {
+          // Merge into existing
+          existing.similar_count = (existing.similar_count || 1) + 1;
+          existing.aggregated_ids = existing.aggregated_ids || [existing.id];
+          existing.aggregated_ids.push(insight.id);
+          existing.significance = Math.max(existing.significance, insight.significance);
+          foundSimilar = true;
+          break;
+        }
+      }
+      
+      if (!foundSimilar) {
+        aggregated.set(insight.id, { ...insight });
+      }
+    }
+    
+    // Replace insights with aggregated version
+    this.insights = Array.from(aggregated.values());
+  }
+
+  private areSimilar(content1: string, content2: string): boolean {
+    // Simple similarity check - can be enhanced
+    const words1 = content1.toLowerCase().split(/\s+/);
+    const words2 = content2.toLowerCase().split(/\s+/);
+    
+    const commonWords = words1.filter(w => words2.includes(w));
+    const similarity = commonWords.length / Math.min(words1.length, words2.length);
+    
+    return similarity > 0.6; // 60% word overlap
+  }
+
+  private removeInsight(id: string): void {
+    this.insights = this.insights.filter(i => i.id !== id && !i.aggregated_ids?.includes(id));
+  }
+
+  setThreshold(threshold: number): void {
+    this.significanceThreshold = Math.max(1, Math.min(10, threshold));
+  }
+
+  getMemoryStats(): any {
+    const total = this.insights.length;
+    const unused = this.insights.filter(i => !i.used).length;
+    const highSig = this.insights.filter(i => i.significance >= 8).length;
+    const aggregated = this.insights.filter(i => i.similar_count && i.similar_count > 1).length;
+    
+    return {
+      total_insights: total,
+      unused_insights: unused,
+      high_significance: highSig,
+      aggregated_patterns: aggregated,
+      memory_limit: this.maxInsightsInMemory,
+      significance_threshold: this.significanceThreshold,
+      estimated_context_usage: `${Math.round((total / this.maxInsightsInMemory) * 100)}%`
+    };
   }
 
   async getStatus(): Promise<ContemplationStatus> {
@@ -303,8 +420,38 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             limit: {
               type: 'number',
               description: 'Maximum insights to return (default 10)'
+            },
+            min_significance: {
+              type: 'number',
+              description: 'Minimum significance score 1-10 (default 5)',
+              minimum: 1,
+              maximum: 10
             }
           },
+        },
+      },
+      {
+        name: 'set_threshold',
+        description: 'Set minimum significance threshold for insights',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            significance_threshold: {
+              type: 'number',
+              description: 'Minimum significance 1-10',
+              minimum: 1,
+              maximum: 10
+            }
+          },
+          required: ['significance_threshold'],
+        },
+      },
+      {
+        name: 'get_memory_stats',
+        description: 'Get memory usage statistics',
+        inputSchema: {
+          type: 'object',
+          properties: {},
         },
       },
       {
@@ -369,14 +516,34 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'get_insights': {
-        const { thought_type, limit } = args as {
+        const { thought_type, limit, min_significance } = args as {
           thought_type?: string;
           limit?: number;
+          min_significance?: number;
         };
+        
+        if (min_significance) {
+          contemplation.setThreshold(min_significance);
+        }
         
         const insights = await contemplation.getInsights(thought_type, limit);
         return {
           content: [{ type: 'text', text: JSON.stringify(insights, null, 2) }],
+        };
+      }
+
+      case 'set_threshold': {
+        const { significance_threshold } = args as { significance_threshold: number };
+        contemplation.setThreshold(significance_threshold);
+        return {
+          content: [{ type: 'text', text: `Significance threshold set to ${significance_threshold}` }],
+        };
+      }
+
+      case 'get_memory_stats': {
+        const stats = contemplation.getMemoryStats();
+        return {
+          content: [{ type: 'text', text: JSON.stringify(stats, null, 2) }],
         };
       }
 
