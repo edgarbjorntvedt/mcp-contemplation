@@ -53,6 +53,30 @@ Add to your Claude Desktop configuration:
 }
 ```
 
+## 🛡️ Resource Management
+
+The contemplation system includes multiple layers of protection against context overflow:
+
+### Automatic Pruning
+- Insights older than 24 hours are removed
+- Used insights are cleared (unless significance ≥ 8)
+- Memory limited to 100 insights maximum
+
+### Insight Aggregation
+- Similar insights are automatically merged
+- Repeated patterns increase significance
+- High-frequency patterns removed after use
+
+### Filtering
+- Default significance threshold: 5/10
+- Only unused insights returned
+- Configurable via `set_threshold()`
+
+### Memory Monitoring
+- Use `get_memory_stats()` to check usage
+- Automatic cleanup when approaching limits
+- Pull-based system - insights only enter context when requested
+
 ## 📖 Available Functions
 
 ### `start_contemplation()`
