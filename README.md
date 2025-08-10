@@ -33,8 +33,9 @@ npm install
 # Build TypeScript
 npm run build
 
-# Ensure contemplation loop is available
-cd /Users/bard/Code/contemplation-loop
+# Ensure contemplation-loop is available (sibling directory is default)
+git clone https://github.com/yourusername/contemplation-loop.git
+cd ../contemplation-loop
 pip install -r requirements.txt
 ```
 
@@ -47,11 +48,32 @@ Add to your Claude Desktop configuration:
   "mcpServers": {
     "contemplation": {
       "command": "node",
-      "args": ["/absolute/path/to/mcp-contemplation/dist/index.js"]
+      "args": ["/absolute/path/to/mcp-contemplation/dist/index.js"],
+      "env": {
+        "CONTEMPLATION_SOURCE_PATH": "/path/to/contemplation-loop",
+        "CONTEMPLATION_DATA_PATH": "/home/user/.claude-brain/contemplation-loop",
+        "CONTEMPLATION_MODEL": "llama3.2:latest",
+        "CONTEMPLATION_PYTHON_PATH": "/usr/bin/python3"
+      }
     }
   }
 }
 ```
+
+### Environment Variables
+
+The MCP server supports these environment variables for customization:
+
+- **`CONTEMPLATION_SOURCE_PATH`** (default: `../contemplation-loop`): Path to contemplation-loop Python scripts
+- **`CONTEMPLATION_DATA_PATH`** (default: `~/.claude-brain/contemplation-loop`): Where contemplation data is stored
+- **`CONTEMPLATION_MODEL`** (default: `llama3.2:latest`): Ollama model for background processing
+- **`CONTEMPLATION_PYTHON_PATH`** (default: auto-detected): Python executable path
+  - **Windows:** `python.exe` (searches PATH)
+  - **macOS:** `python3`
+  - **Linux:** `/usr/bin/python3`
+  - **Custom:** Set this variable to override auto-detection
+
+These environment variables are automatically passed to the contemplation-loop subprocess, ensuring consistent configuration across platforms.
 
 ## 🛡️ Resource Management
 

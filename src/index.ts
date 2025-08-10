@@ -8,6 +8,8 @@ import {
 import { spawn, ChildProcess } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as os from 'os';
+import { fileURLToPath } from 'url';
 
 // Documentation
 const HELP_DOCUMENTATION = `
@@ -70,12 +72,42 @@ Returns this documentation.
 - **question**: Explore interesting questions that arise
 - **general**: Open-ended reflection
 
+## Configuration:
+Environment variables for customization:
+- `CONTEMPLATION_SOURCE_PATH`: Path to contemplation-loop Python scripts
+- `CONTEMPLATION_DATA_PATH`: Where contemplation data is stored
+- `CONTEMPLATION_MODEL`: Ollama model to use (default: llama3.2:latest)
+- `CONTEMPLATION_PYTHON_PATH`: Python executable path (auto-detected per OS if not set)
+
 ## How It Works:
 The contemplation loop runs as a background process, using local LLMs (via Ollama)
 to process thoughts between conversations. High-significance insights are saved
 permanently to Obsidian, while medium-significance thoughts go to temporary scratch
 storage for 4 days. The system learns which insights prove valuable over time.
 `;
+
+// Python executable path - OS-specific defaults
+function getDefaultPythonPath(): string {
+  const platform = os.platform();
+  switch (platform) {
+    case 'win32':
+      return 'python.exe'; // Windows looks in PATH
+    case 'darwin':
+      return 'python3'; // macOS
+    case 'linux':
+      return '/usr/bin/python3'; // Linux
+    default:
+      return 'python3'; // Fallback - try PATH
+  }
+}
+
+// Configuration
+// SOURCE_PATH: Where the contemplation-loop Python scripts are located (assumes sibling directory)
+const CONTEMPLATION_SOURCE_PATH = process.env.CONTEMPLATION_SOURCE_PATH || fileURLToPath(new URL('../../contemplation-loop', import.meta.url));
+// DATA_PATH: Where contemplation-loop stores its data (passed to Python subprocess)
+const CONTEMPLATION_DATA_PATH = process.env.CONTEMPLATION_DATA_PATH || path.join(os.homedir(), '.claude-brain', 'contemplation-loop');
+const CONTEMPLATION_MODEL = process.env.CONTEMPLATION_MODEL || 'llama3.2:latest';
+const PYTHON_EXECUTABLE = process.env.CONTEMPLATION_PYTHON_PATH || getDefaultPythonPath();
 
 interface ContemplationStatus {
   running: boolean;
@@ -105,8 +137,9 @@ class ContemplationManager {
   private significanceThreshold: number = 5;
   
   constructor() {
-    this.contemplationPath = '/Users/bard/Code/contemplation-loop/src/contemplation_loop.py';
-    this.bridgePath = '/Users/bard/Code/contemplation-loop/src/contemplation_bridge.py';
+    // Use configurable code path for finding Python scripts
+    this.contemplationPath = path.join(CONTEMPLATION_SOURCE_PATH, 'src', 'contemplation_loop.py');
+    this.bridgePath = path.join(CONTEMPLATION_SOURCE_PATH, 'src', 'contemplation_bridge.py');
   }
 
   async start(): Promise<string> {
@@ -115,10 +148,19 @@ class ContemplationManager {
     }
 
     try {
-      this.subprocess = spawn('python3', [this.contemplationPath], {
+      // Set up environment variables for the contemplation-loop subprocess
+      const env = { 
+        ...process.env, // litt heftig eller?
+        CONTEMPLATION_DATA_PATH: CONTEMPLATION_DATA_PATH,
+        CONTEMPLATION_MODEL: CONTEMPLATION_MODEL
+      };
+
+      this.subprocess = spawn(PYTHON_EXECUTABLE, [this.contemplationPath], {
         cwd: path.dirname(this.contemplationPath),
         stdio: ['pipe', 'pipe', 'pipe'],
-        detached: false
+        detached: false,
+        env: env,  // Pass configured environment variables
+        shell: false
       });
 
       this.subprocess.stdout?.on('data', (data) => {
@@ -126,15 +168,16 @@ class ContemplationManager {
           const lines = data.toString().split('\n').filter((line: string) => line.trim());
           for (const line of lines) {
             const response = JSON.parse(line);
-            if (response.has_insight) {
+            if (response.has_insight && response.insight) {
               this.insights.push({
                 id: response.thought_id,
-                thought_type: response.thought_type,
+                thought_type: response.type || 'general', // Use 'type' from Python response
                 content: response.insight,
                 significance: response.significance || 5,
                 timestamp: new Date().toISOString(),
                 used: false
               });
+              console.error(`[MCP] New insight captured: ${response.thought_id}`);
             }
           }
         } catch (e) {
@@ -142,8 +185,20 @@ class ContemplationManager {
         }
       });
 
+      this.subprocess.stderr?.on('data', (data) => {
+        console.error(`[MCP-DEBUG] RECEIVED STDERR: ${data.toString()}`);
+      });
+
       this.subprocess.on('error', (err) => {
-        console.error('Contemplation process error:', err);
+        console.error('[MCP-DEBUG] Contemplation process error:', err);
+      });
+
+      this.subprocess.on('exit', (code, signal) => {
+        console.error(`[MCP-DEBUG] Subprocess exited with code ${code}, signal ${signal}`);
+      });
+
+      this.subprocess.on('close', (code, signal) => {
+        console.error(`[MCP-DEBUG] Subprocess closed with code ${code}, signal ${signal}`);
       });
 
       // Give it a moment to start
@@ -302,7 +357,7 @@ class ContemplationManager {
 
   async getStatus(): Promise<ContemplationStatus> {
     const running = !!this.subprocess && !this.subprocess.killed;
-    
+
     if (!running) {
       return {
         running: false,
@@ -335,7 +390,7 @@ class ContemplationManager {
   }
 
   async clearScratch(): Promise<number> {
-    const scratchPath = '/Users/bard/Code/contemplation-loop/tmp/contemplation';
+    const scratchPath = path.join(CONTEMPLATION_DATA_PATH, 'tmp', 'contemplation');
     let count = 0;
 
     try {
